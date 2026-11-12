@@ -65,13 +65,27 @@ elif page == "Модель банка":
             st.session_state["bank_result"] = simulate_bank(cfg)
 
     result = st.session_state.get("bank_result")
-    st.markdown("#### 1. Структура системы")
-    graph_fig, graph_ax = plt.subplots(figsize=(12, 4.8))
-    draw_bank_graph(clerks, graph_ax)
-    graph_fig.tight_layout()
-    st.pyplot(graph_fig, use_container_width=True)
-    plt.close(graph_fig)
-    st.caption("Рёбра показывают возможные переходы клиента. Из общей очереди клиент направляется к любому освободившемуся окну.")
+    st.markdown("#### 1. План операционного зала")
+    st.caption("Физические зоны банка: вход, регистрация, зал ожидания, окна операторов и выход.")
+    import plotly.graph_objects as go
+    floor = go.Figure()
+    zones=[(-.4,-2.2,1.15,2.7,"#E0F2FE"),(1.25,-2.2,2.8,2.7,"#F1F5F9"),
+           (2.9,-2.2,7.65,2.7,"#FFFBEB"),(7.8,-2.2,11.3,2.7,"#ECFDF5")]
+    for x0,y0,x1,y1,col in zones:
+        floor.add_shape(type="rect",x0=x0,y0=y0,x1=x1,y1=y1,line=dict(color="#E2E8F0"),fillcolor=col,layer="below")
+    floor.add_shape(type="rect",x0=-.6,y0=-2.4,x1=11.5,y1=3,line=dict(color="#CBD5E1",width=2),fillcolor="rgba(255,255,255,0)",layer="below")
+    for x,label in [(0.35,"ВХОД"),(2.0,"РЕГИСТРАЦИЯ"),(5.25,"ЗАЛ ОЖИДАНИЯ"),(9.55,"ОПЕРАЦИОННЫЕ ОКНА")]:
+        floor.add_annotation(x=x,y=2.35,text=f"<b>{label}</b>",showarrow=False,font=dict(size=11,color="#334155"))
+    for k in range(clerks):
+        yy=1.55-k*(3.1/max(clerks-1,1))
+        floor.add_shape(type="rect",x0=8.55,y0=yy-.38,x1=10.55,y1=yy+.38,line=dict(color="#86EFAC",width=1.5),fillcolor="#DCFCE7")
+        floor.add_annotation(x=9.55,y=yy,text=f"<b>Окно {k+1}</b><br>оператор",showarrow=False,font=dict(size=11,color="#166534"))
+    floor.add_annotation(x=5.25,y=-1.8,text="Места ожидания клиентов",showarrow=False,font=dict(size=11,color="#92400E"))
+    floor.add_annotation(x=10.9,y=-1.8,text="ВЫХОД",showarrow=False,font=dict(size=11,color="#166534"))
+    floor.update_layout(height=370,margin=dict(l=5,r=5,t=5,b=5),showlegend=False,
+        xaxis=dict(range=[-.8,11.7],visible=False,fixedrange=True),yaxis=dict(range=[-2.6,3.2],visible=False,fixedrange=True),
+        paper_bgcolor="white",plot_bgcolor="white")
+    st.plotly_chart(floor,use_container_width=True,config={"displayModeBar":False})
 
     if result:
         st.markdown("#### 2. Основные показатели")
@@ -93,80 +107,71 @@ elif page == "Модель банка":
             st.line_chart(timeline.set_index("Время")[["Очередь", "Занято окон"]], height=300)
             st.caption("Число ожидающих и занятых окон фиксируется с заданным временным шагом.")
         with tab2:
-            st.write("Запусти воспроизведение: точки-клиенты будут перемещаться от входа через регистрацию и очередь к окнам обслуживания, а затем к выходу.")
+            st.markdown("**Интерактивное воспроизведение работы банка**")
+            st.caption("Каждый маркер — отдельный клиент. Положение и цвет отражают его фактический статус в симуляции.")
             import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-
-            positions = {"Вход": (0, 0), "Регистрация": (2, 0), "Очередь": (4, 0), "Выход": (9, 0)}
+            records=sorted(result["records"],key=lambda r:r["arrival"])
+            max_t=max([float(r["finish"]) for r in records]+[float(horizon)])
+            step=st.select_slider("Шаг воспроизведения",options=[1,2,5,10,15],value=5,key="bank_anim_step")
+            times=list(range(0,int(np.ceil(max_t))+1,step))
+            if times[-1]<max_t: times.append(max_t)
+            slots=[(3.45+(q%6)*.62,1.25-(q//6)*1.05) for q in range(18)]
+            colors={"В пути":"#2563EB","Ожидают":"#F59E0B","Обслуживаются":"#16A34A","Выходят":"#64748B"}
+            names=list(colors)
+            def trace_data(t):
+                g={n:([],[],[],[]) for n in names}; waiting=[]
+                for r in records:
+                    a=float(r["arrival"]); f=float(r["finish"]); served=bool(r["served"])
+                    stt=float(r["start"]) if served else np.nan
+                    cid=int(r["id"])
+                    if t<a: continue
+                    if t<a+1:
+                        p=max(0,min(1,(t-a)))
+                        x,y=.15+1.75*p,-.65+.2*p; status="В пути"
+                    elif served and stt<=t<f:
+                        k=int(r["clerk"]); y=1.55-(k-1)*(3.1/max(clerks-1,1)); x=9.55; status="Обслуживаются"
+                    elif t>=f:
+                        if t<f+1.8:
+                            p=(t-f)/1.8; x,y=9.7+p,-1.75; status="Выходят"
+                        else: continue
+                    else:
+                        waiting.append(r); continue
+                    q=g[status]; q[0].append(x);q[1].append(y);q[2].append(f"Клиент {cid}<br>Статус: {status}<br>Ожидание: {float(r['wait']):.1f} мин");q[3].append(f"№{cid}")
+                waiting.sort(key=lambda r:r["arrival"])
+                for i,r in enumerate(waiting):
+                    x,y=slots[i] if i<len(slots) else (3.5+(i%6)*.62,-1.8-(i//6)*.5)
+                    q=g["Ожидают"];q[0].append(x);q[1].append(y);q[2].append(f"Клиент {int(r['id'])}<br>Статус: ожидает<br>Ожидание сейчас: {max(0,t-float(r['arrival'])):.1f} мин");q[3].append(f"№{int(r['id'])}")
+                out=[]
+                for n in names:
+                    x,y,h,labels=g[n]
+                    out.append(go.Scatter(x=x,y=y,mode="markers+text",text=labels,textposition="top center",
+                        textfont=dict(size=9,color="#334155"),marker=dict(size=19,color=colors[n],line=dict(color="white",width=2)),
+                        hovertext=h,hovertemplate="%{hovertext}<extra></extra>",name=n))
+                return out
+            anim=go.Figure(data=trace_data(times[0]))
+            for x0,y0,x1,y1,col in [(-.4,-2.2,1.15,2.7,"#E0F2FE"),(1.25,-2.2,2.8,2.7,"#F1F5F9"),(2.9,-2.2,7.65,2.7,"#FFFBEB"),(7.8,-2.2,11.3,2.7,"#ECFDF5")]:
+                anim.add_shape(type="rect",x0=x0,y0=y0,x1=x1,y1=y1,line=dict(color="#E2E8F0"),fillcolor=col,layer="below")
+            anim.add_shape(type="rect",x0=-.6,y0=-2.4,x1=11.5,y1=3,line=dict(color="#CBD5E1",width=2),fillcolor="rgba(255,255,255,0)",layer="below")
+            for x,label in [(0.35,"ВХОД"),(2,"РЕГИСТРАЦИЯ"),(5.25,"ЗАЛ ОЖИДАНИЯ"),(9.55,"ОКНА ОБСЛУЖИВАНИЯ")]:
+                anim.add_annotation(x=x,y=2.35,text=f"<b>{label}</b>",showarrow=False,font=dict(size=11,color="#334155"))
             for k in range(clerks):
-                positions[f"Окно {k+1}"] = (6.5, 1.65-k*(3.3/max(clerks-1,1)))
-            anim_step = st.select_slider("Шаг анимации, минут", options=[1, 2, 5, 10, 15, 30], value=5, key="anim_step")
-            max_t = int(np.ceil(max(horizon, float(timeline["Время"].max())) / anim_step) * anim_step)
-            frame_times = list(range(0, max_t + 1, anim_step))
-            records = result["records"]
-
-            def customer_xy(rec, t):
-                arr = float(rec["arrival"])
-                if t < arr:
-                    return None
-                if not rec["served"]:
-                    leave = float(rec["finish"])
-                    if t >= leave:
-                        return None
-                    return (4.0, -0.35)
-                start, finish = float(rec["start"]), float(rec["finish"])
-                clerk = int(rec["clerk"])
-                if t < start:
-                    return (4.0, -0.35)
-                if t < finish:
-                    x0, y0 = positions["Очередь"]
-                    x1, y1 = positions[f"Окно {clerk}"]
-                    frac = min(1.0, max(0.0, (t-start)/max(finish-start, 1e-9)))
-                    return (x0+(x1-x0)*frac, y0+(y1-y0)*frac)
-                return None
-
-            def animation_trace(t):
-                xs, ys, hover = [], [], []
-                for rec in records:
-                    xy = customer_xy(rec, t)
-                    if xy is not None:
-                        xs.append(xy[0]); ys.append(xy[1])
-                        hover.append(f"Клиент {rec['id']}<br>Ожидание: {rec['wait']:.1f} мин")
-                return go.Scatter(x=xs, y=ys, mode="markers", name="Клиенты",
-                    marker=dict(size=13, color="#F59E0B", line=dict(width=1, color="#92400E")),
-                    text=hover, hovertemplate="%{text}<extra></extra>")
-
-            nodes_x = [0, 2, 4] + [6.5]*clerks + [9]
-            nodes_y = [0, 0, 0] + [positions[f"Окно {k+1}"][1] for k in range(clerks)] + [0]
-            node_labels = ["Вход", "Регистрация", "Общая очередь"] + [f"Окно {k+1}" for k in range(clerks)] + ["Выход"]
-            edges_x, edges_y = [], []
-            for a,b in [(0,1),(1,2)] + [(2,3+k) for k in range(clerks)] + [(3+k,len(nodes_x)-1) for k in range(clerks)]:
-                edges_x += [nodes_x[a],nodes_x[b],None]; edges_y += [nodes_y[a],nodes_y[b],None]
-            base_traces = [
-                go.Scatter(x=edges_x,y=edges_y,mode="lines",line=dict(color="#94A3B8",width=3),hoverinfo="skip",name="Маршрут"),
-                go.Scatter(x=nodes_x,y=nodes_y,mode="markers+text",text=node_labels,textposition="bottom center",
-                    marker=dict(size=34,color=["#DBEAFE","#EDE9FE","#FDE68A"]+["#BBF7D0"]*clerks+["#FECACA"],
-                    line=dict(color="#475569",width=1)),name="Этапы",hoverinfo="text")
-            ]
-            frames = [go.Frame(name=str(t), data=[animation_trace(t)], traces=[2]) for t in frame_times]
-            fig = go.Figure(data=base_traces+[animation_trace(frame_times[0])], frames=frames)
-            fig.update_layout(height=480, margin=dict(l=10,r=10,t=35,b=20), showlegend=False,
-                title="Движение клиентов по графу банка",
-                xaxis=dict(range=[-1,10],visible=False), yaxis=dict(range=[-1.2,2.5],visible=False),
-                updatemenus=[dict(type="buttons",showactive=False,x=0.02,y=1.12,
-                    buttons=[dict(label="▶ Воспроизвести",method="animate",
-                        args=[None,{"frame":{"duration":180,"redraw":True},"fromcurrent":True,
-                                   "transition":{"duration":100}}]),
-                             dict(label="⏸ Пауза",method="animate",
-                        args=[[None],{"frame":{"duration":0,"redraw":False},"mode":"immediate"}])])],
-                sliders=[dict(active=0,steps=[dict(method="animate",args=[[str(t)],
-                    {"mode":"immediate","frame":{"duration":0,"redraw":True},"transition":{"duration":0}}],
-                    label=str(t)) for t in frame_times],x=0.08,y=0, len=0.88)])
-            fig.update_layout(annotations=[dict(x=0.98,y=1.12,xref="paper",yref="paper",
-                text="Время модели: минуты",showarrow=False,xanchor="right")])
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("Каждая точка — клиент. В очереди клиенты находятся у узла «Общая очередь», при обслуживании движутся к назначенному окну. После завершения обслуживания точка исчезает у выхода; клиенты, не дождавшиеся окна, покидают очередь.")
-
+                yy=1.55-k*(3.1/max(clerks-1,1))
+                anim.add_shape(type="rect",x0=8.55,y0=yy-.38,x1=10.55,y1=yy+.38,line=dict(color="#86EFAC",width=1.5),fillcolor="#DCFCE7",layer="below")
+                anim.add_annotation(x=9.55,y=yy,text=f"ОКНО {k+1}",showarrow=False,font=dict(size=10,color="#166534"))
+            anim.add_annotation(x=5.2,y=-2.05,text="МЕСТА ОЖИДАНИЯ",showarrow=False,font=dict(size=10,color="#92400E"))
+            anim.add_annotation(x=10.9,y=-1.8,text="ВЫХОД",showarrow=False,font=dict(size=10,color="#166534"))
+            anim.frames=[go.Frame(name=str(t),data=trace_data(t),traces=[0,1,2,3]) for t in times]
+            anim.update_layout(height=550,margin=dict(l=5,r=5,t=55,b=25),paper_bgcolor="white",plot_bgcolor="white",
+                xaxis=dict(range=[-.8,11.7],visible=False,fixedrange=True),yaxis=dict(range=[-2.6,3.2],visible=False,fixedrange=True),
+                legend=dict(orientation="h",y=1.12,x=.02,font=dict(size=10)),
+                updatemenus=[dict(type="buttons",direction="left",x=.02,y=1.23,buttons=[
+                    dict(label="▶ Старт",method="animate",args=[None,{"frame":{"duration":220,"redraw":True},"fromcurrent":True,"transition":{"duration":80}}]),
+                    dict(label="Ⅱ Пауза",method="animate",args=[[None],{"mode":"immediate","frame":{"duration":0,"redraw":False}}])])],
+                sliders=[dict(active=0,x=.08,y=-.04,len=.88,currentvalue=dict(prefix="Время модели: ",suffix=" мин"),
+                    steps=[dict(method="animate",args=[[str(t)],{"mode":"immediate","frame":{"duration":0,"redraw":True},"transition":{"duration":0}}],label=str(int(t))) for t in times])])
+            st.plotly_chart(anim,use_container_width=True,config={"displayModeBar":False})
+            st.caption("Синий — вход и регистрация; оранжевый — очередь; зелёный — обслуживание; серый — выход. Наведи курсор на клиента для подробностей.")
+            # Live-state summary at the selected first frame is complemented by the full timeline below.
         st.markdown("#### 4. Время ожидания клиентов")
         served_df = pd.DataFrame([r for r in result["records"] if r["served"]])
         if not served_df.empty:
