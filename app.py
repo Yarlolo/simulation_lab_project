@@ -88,22 +88,84 @@ elif page == "Модель банка":
 
         timeline = pd.DataFrame(result["timeline"])
         st.markdown("#### 3. Динамика работы банка")
-        tab1, tab2 = st.tabs(["Очередь и окна", "Прохождение клиентов"])
+        tab1, tab2 = st.tabs(["Очередь и окна", "Анимация движения клиентов"])
         with tab1:
             st.line_chart(timeline.set_index("Время")[["Очередь", "Занято окон"]], height=300)
             st.caption("Число ожидающих и занятых окон фиксируется с заданным временным шагом.")
         with tab2:
-            if len(timeline) > 1:
-                idx = st.slider("Момент моделирования (номер замера)", 0, len(timeline)-1, min(30, len(timeline)-1), key="bank_snapshot")
-                snap = timeline.iloc[idx]
-                st.write(f"Время: **{snap['Время']:.0f} мин** · В очереди: **{int(snap['Очередь'])}** · Занято окон: **{int(snap['Занято окон'])} из {clerks}**")
-                st.progress(min(1.0, float(snap["Занято окон"])/clerks), text="Доля занятых окон в выбранный момент")
-                live_fig, live_ax = plt.subplots(figsize=(12, 4.5))
-                draw_bank_graph(clerks, live_ax, int(snap["Очередь"]), int(snap["Занято окон"]))
-                live_fig.tight_layout()
-                st.pyplot(live_fig, use_container_width=True)
-                plt.close(live_fig)
-                st.caption("На схеме зелёным отмечены занятые окна, жёлтым — очередь, в которой есть клиенты.")
+            st.write("Запусти воспроизведение: точки-клиенты будут перемещаться от входа через регистрацию и очередь к окнам обслуживания, а затем к выходу.")
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+
+            positions = {"Вход": (0, 0), "Регистрация": (2, 0), "Очередь": (4, 0), "Выход": (9, 0)}
+            for k in range(clerks):
+                positions[f"Окно {k+1}"] = (6.5, 1.65-k*(3.3/max(clerks-1,1)))
+            anim_step = st.select_slider("Шаг анимации, минут", options=[1, 2, 5, 10, 15, 30], value=5, key="anim_step")
+            max_t = int(np.ceil(max(horizon, float(timeline["Время"].max())) / anim_step) * anim_step)
+            frame_times = list(range(0, max_t + 1, anim_step))
+            records = result["records"]
+
+            def customer_xy(rec, t):
+                arr = float(rec["arrival"])
+                if t < arr:
+                    return None
+                if not rec["served"]:
+                    leave = float(rec["finish"])
+                    if t >= leave:
+                        return None
+                    return (4.0, -0.35)
+                start, finish = float(rec["start"]), float(rec["finish"])
+                clerk = int(rec["clerk"])
+                if t < start:
+                    return (4.0, -0.35)
+                if t < finish:
+                    x0, y0 = positions["Очередь"]
+                    x1, y1 = positions[f"Окно {clerk}"]
+                    frac = min(1.0, max(0.0, (t-start)/max(finish-start, 1e-9)))
+                    return (x0+(x1-x0)*frac, y0+(y1-y0)*frac)
+                return None
+
+            def animation_trace(t):
+                xs, ys, hover = [], [], []
+                for rec in records:
+                    xy = customer_xy(rec, t)
+                    if xy is not None:
+                        xs.append(xy[0]); ys.append(xy[1])
+                        hover.append(f"Клиент {rec['id']}<br>Ожидание: {rec['wait']:.1f} мин")
+                return go.Scatter(x=xs, y=ys, mode="markers", name="Клиенты",
+                    marker=dict(size=13, color="#F59E0B", line=dict(width=1, color="#92400E")),
+                    text=hover, hovertemplate="%{text}<extra></extra>")
+
+            nodes_x = [0, 2, 4] + [6.5]*clerks + [9]
+            nodes_y = [0, 0, 0] + [positions[f"Окно {k+1}"][1] for k in range(clerks)] + [0]
+            node_labels = ["Вход", "Регистрация", "Общая очередь"] + [f"Окно {k+1}" for k in range(clerks)] + ["Выход"]
+            edges_x, edges_y = [], []
+            for a,b in [(0,1),(1,2)] + [(2,3+k) for k in range(clerks)] + [(3+k,len(nodes_x)-1) for k in range(clerks)]:
+                edges_x += [nodes_x[a],nodes_x[b],None]; edges_y += [nodes_y[a],nodes_y[b],None]
+            base_traces = [
+                go.Scatter(x=edges_x,y=edges_y,mode="lines",line=dict(color="#94A3B8",width=3),hoverinfo="skip",name="Маршрут"),
+                go.Scatter(x=nodes_x,y=nodes_y,mode="markers+text",text=node_labels,textposition="bottom center",
+                    marker=dict(size=34,color=["#DBEAFE","#EDE9FE","#FDE68A"]+["#BBF7D0"]*clerks+["#FECACA"],
+                    line=dict(color="#475569",width=1)),name="Этапы",hoverinfo="text")
+            ]
+            frames = [go.Frame(name=str(t), data=[animation_trace(t)], traces=[2]) for t in frame_times]
+            fig = go.Figure(data=base_traces+[animation_trace(frame_times[0])], frames=frames)
+            fig.update_layout(height=480, margin=dict(l=10,r=10,t=35,b=20), showlegend=False,
+                title="Движение клиентов по графу банка",
+                xaxis=dict(range=[-1,10],visible=False), yaxis=dict(range=[-1.2,2.5],visible=False),
+                updatemenus=[dict(type="buttons",showactive=False,x=0.02,y=1.12,
+                    buttons=[dict(label="▶ Воспроизвести",method="animate",
+                        args=[None,{"frame":{"duration":180,"redraw":True},"fromcurrent":True,
+                                   "transition":{"duration":100}}]),
+                             dict(label="⏸ Пауза",method="animate",
+                        args=[[None],{"frame":{"duration":0,"redraw":False},"mode":"immediate"}])])],
+                sliders=[dict(active=0,steps=[dict(method="animate",args=[[str(t)],
+                    {"mode":"immediate","frame":{"duration":0,"redraw":True},"transition":{"duration":0}}],
+                    label=str(t)) for t in frame_times],x=0.08,y=0, len=0.88)])
+            fig.update_layout(annotations=[dict(x=0.98,y=1.12,xref="paper",yref="paper",
+                text="Время модели: минуты",showarrow=False,xanchor="right")])
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Каждая точка — клиент. В очереди клиенты находятся у узла «Общая очередь», при обслуживании движутся к назначенному окну. После завершения обслуживания точка исчезает у выхода; клиенты, не дождавшиеся окна, покидают очередь.")
 
         st.markdown("#### 4. Время ожидания клиентов")
         served_df = pd.DataFrame([r for r in result["records"] if r["served"]])
